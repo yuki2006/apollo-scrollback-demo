@@ -1,0 +1,139 @@
+import { useCallback, useLayoutEffect, useMemo } from "react";
+import {
+  NetworkStatus,
+  useApolloClient,
+  useQuery,
+  type ApolloCache,
+  type StoreObject,
+  type TypedDocumentNode,
+  type WatchQueryFetchPolicy,
+} from "@apollo/client";
+import { useLocation } from "react-router-dom";
+import { useNavKind } from "../hooks/useNavKind";
+
+type Edge<TNode> = { cursor: string; node: TNode };
+type Connection<TNode> = {
+  edges: Edge<TNode>[];
+  pageInfo: { endCursor: string | null; hasNextPage: boolean };
+};
+
+function walk(data: unknown, path: readonly string[]): unknown {
+  let node: unknown = data;
+  for (const seg of path) {
+    if (node && typeof node === "object" && seg in (node as Record<string, unknown>)) {
+      node = (node as Record<string, unknown>)[seg];
+    } else {
+      return undefined;
+    }
+  }
+  return node;
+}
+
+function getEvictArgs(
+  data: unknown,
+  paginationPath: readonly string[],
+  cache: ApolloCache<unknown>
+): { id?: string; fieldName: string } | null {
+  const fieldName = paginationPath[paginationPath.length - 1];
+  if (paginationPath.length === 1) return { fieldName };
+  const parent = walk(data, paginationPath.slice(0, -1));
+  if (!parent || typeof parent !== "object") return null;
+  const id = cache.identify(parent as StoreObject);
+  return id ? { id, fieldName } : null;
+}
+
+export type InfiniteQueryVars = {
+  first?: number;
+  after?: string | null;
+};
+
+export type InfiniteQueryOptions<TVars extends InfiniteQueryVars> = {
+  variables?: Omit<TVars, "first" | "after">;
+  /**
+   * data 内の Connection の位置を明示。
+   * 例: top-level なら ["posts"]、nested なら ["collection", "collectionItems"]。
+   */
+  paginationPath: readonly string[];
+  pageSize?: number;
+  skip?: boolean;
+};
+
+export type InfiniteQueryResult<TData, TNode> = {
+  data: TData | undefined;
+  nodes: TNode[];
+  hasNextPage: boolean;
+  loading: boolean;
+  loadingMore: boolean;
+  loadMore: () => Promise<void>;
+  refresh: () => Promise<void>;
+  error: unknown;
+};
+
+export function useInfiniteQuery<TData, TVars extends InfiniteQueryVars, TNode>(
+  query: TypedDocumentNode<TData, TVars>,
+  options: InfiniteQueryOptions<TVars>
+): InfiniteQueryResult<TData, TNode> {
+  const { paginationPath, pageSize = 20, skip = false, variables } = options;
+  const navKind = useNavKind();
+  const location = useLocation();
+  const { cache } = useApolloClient();
+
+  const fetchPolicy: WatchQueryFetchPolicy =
+    navKind === "POP" ? "cache-first" : "cache-and-network";
+
+  const queryVars = useMemo(
+    () => ({ first: pageSize, ...(variables ?? {}) }) as unknown as TVars,
+    [pageSize, variables]
+  );
+
+  const { data, fetchMore, refetch, networkStatus, error } = useQuery(query, {
+    variables: queryVars,
+    fetchPolicy,
+    nextFetchPolicy: "cache-first",
+    notifyOnNetworkStatusChange: true,
+    skip,
+  });
+
+  // POP 以外で着地したら累積を捨てる。nested の場合 data から親エンティティを引いて identify。
+  useLayoutEffect(() => {
+    if (navKind === "POP") return;
+    const args = getEvictArgs(data, paginationPath, cache);
+    if (args) {
+      cache.evict(args);
+      cache.gc();
+    }
+    // 依存は location.key と navKind のみ。data 変化での再 evict は意図しない。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.key, navKind]);
+
+  const connection = walk(data, paginationPath) as Connection<TNode> | undefined;
+  const nodes = useMemo(() => connection?.edges.map((e) => e.node) ?? [], [connection]);
+
+  const loadMore = useCallback(async () => {
+    const pi = connection?.pageInfo;
+    if (!pi?.hasNextPage || !pi.endCursor) return;
+    await fetchMore({
+      variables: { after: pi.endCursor } as unknown as Partial<TVars>,
+    });
+  }, [connection, fetchMore]);
+
+  const refresh = useCallback(async () => {
+    const args = getEvictArgs(data, paginationPath, cache);
+    if (args) {
+      cache.evict(args);
+      cache.gc();
+    }
+    await refetch();
+  }, [cache, data, paginationPath, refetch]);
+
+  return {
+    data,
+    nodes,
+    hasNextPage: connection?.pageInfo.hasNextPage ?? false,
+    loading: networkStatus === NetworkStatus.loading,
+    loadingMore: networkStatus === NetworkStatus.fetchMore,
+    loadMore,
+    refresh,
+    error,
+  };
+}
