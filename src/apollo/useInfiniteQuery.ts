@@ -56,6 +56,15 @@ export type InfiniteQueryOptions<TVars extends InfiniteQueryVars> = {
   paginationPath: readonly string[];
   pageSize?: number;
   skip?: boolean;
+  /**
+   * 戻る (POP) 時のフェッチポリシー。
+   * - "cache-first" (default): 同期返却のみ。スクロール復元が安定。
+   * - "cache-and-network": キャッシュ即時表示 + バックグラウンドで先頭ページを再取得。
+   *   累積された 2 ページ目以降には触れないので、頻繁に更新されるドメインで
+   *   「戻った瞬間の見た目はキャッシュ、その後silentに先頭が最新化」を狙える。
+   *   行高が変動する UI では復元位置がズレる可能性あり。
+   */
+  popFetchPolicy?: "cache-first" | "cache-and-network";
 };
 
 export type InfiniteQueryResult<TData, TNode> = {
@@ -73,13 +82,19 @@ export function useInfiniteQuery<TData, TVars extends InfiniteQueryVars, TNode>(
   query: TypedDocumentNode<TData, TVars>,
   options: InfiniteQueryOptions<TVars>
 ): InfiniteQueryResult<TData, TNode> {
-  const { paginationPath, pageSize = 20, skip = false, variables } = options;
+  const {
+    paginationPath,
+    pageSize = 20,
+    skip = false,
+    variables,
+    popFetchPolicy = "cache-first",
+  } = options;
   const navKind = useNavKind();
   const location = useLocation();
   const { cache } = useApolloClient();
 
   const fetchPolicy: WatchQueryFetchPolicy =
-    navKind === "POP" ? "cache-first" : "cache-and-network";
+    navKind === "POP" ? popFetchPolicy : "cache-and-network";
 
   const queryVars = useMemo(
     () => ({ first: pageSize, ...(variables ?? {}) }) as unknown as TVars,

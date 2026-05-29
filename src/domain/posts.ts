@@ -52,6 +52,9 @@ export const POST_QUERY = gql`
 export function usePostsList() {
   const result = useInfiniteQuery<PostsData, PostsVars, Post>(POSTS_QUERY, {
     paginationPath: ["posts"],
+    // 戻り着地時もバックグラウンドで先頭ページを silent に最新化する。
+    // 累積された 2 ページ目以降は触らないので、復元位置は基本的に維持される。
+    popFetchPolicy: "cache-and-network",
   });
   return {
     posts: result.nodes,
