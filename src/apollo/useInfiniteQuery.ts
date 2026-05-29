@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo } from "react";
 import {
   NetworkStatus,
   useApolloClient,
@@ -10,6 +10,10 @@ import {
 } from "@apollo/client";
 import { useLocation } from "react-router-dom";
 import { useNavKind } from "../hooks/useNavKind";
+import {
+  evictRegisteredPaginations,
+  registerPagination,
+} from "./paginationRegistry";
 
 type Edge<TNode> = { cursor: string; node: TNode };
 type Connection<TNode> = {
@@ -109,17 +113,26 @@ export function useInfiniteQuery<TData, TVars extends InfiniteQueryVars, TNode>(
     skip,
   });
 
-  // POP 以外で着地したら累積を捨てる。nested の場合 data から親エンティティを引いて identify。
+  // POP 以外で着地したら累積を捨てる。
+  // 1. 自分の Connection field を evict
+  // 2. registry に積まれた他の pagination field も evict
+  //    (ユーザがこれまでに訪れた他リストの古い tail を残さない)
+  // nested の場合 data から親エンティティを引いて identify。
   useLayoutEffect(() => {
     if (navKind === "POP") return;
     const args = getEvictArgs(data, paginationPath, cache);
-    if (args) {
-      cache.evict(args);
-      cache.gc();
-    }
+    if (args) cache.evict(args);
+    evictRegisteredPaginations(cache, args ? { except: args } : {});
     // 依存は location.key と navKind のみ。data 変化での再 evict は意図しない。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.key, navKind]);
+
+  // data が確定したら自分の evict 記述子を registry に積む。
+  // 次回以降の PUSH/RELOAD で他の pagination からも掃除対象になる。
+  useEffect(() => {
+    const args = getEvictArgs(data, paginationPath, cache);
+    if (args) registerPagination(args);
+  }, [data, paginationPath, cache]);
 
   const connection = walk(data, paginationPath) as Connection<TNode> | undefined;
   const nodes = useMemo(() => connection?.edges.map((e) => e.node) ?? [], [connection]);
